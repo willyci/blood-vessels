@@ -46,6 +46,10 @@ namespace ProjectBootstrap
             var light = new GameObject("Directional Light").AddComponent<Light>();
             light.type = LightType.Directional;
             light.transform.rotation = Quaternion.Euler(50, -30, 0);
+            // The empty scene has no sky, so give it flat ambient light (the table would read
+            // dark otherwise, especially against passthrough).
+            RenderSettings.ambientMode = AmbientMode.Flat;
+            RenderSettings.ambientLight = new Color(0.6f, 0.6f, 0.62f);
 
             var rig = BuildRig();
             BuildTable();
@@ -68,6 +72,7 @@ namespace ProjectBootstrap
             var rig = (GameObject)PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(RigPrefab));
             rig.GetComponent<OVRManager>().isInsightPassthroughEnabled = true;
             rig.AddComponent<OVRPassthroughLayer>();   // underlay: the real room behind the scene
+            rig.AddComponent<VesselEditorViewFallback>();   // standing view when no headset is running
 
             // Passthrough shows wherever the camera clears to transparent.
             var eye = rig.transform.Find("TrackingSpace/CenterEyeAnchor").GetComponent<Camera>();
@@ -255,6 +260,7 @@ namespace ProjectBootstrap
                 var label = Label("Label", button, buttons[i].label, 0.0026f, TextAnchor.MiddleCenter);
                 label.transform.localPosition = new Vector3(0, 0.003f, 0.045f);
                 label.transform.localRotation = Quaternion.Euler(60, 0, 0);
+                label.color = new Color(0.12f, 0.14f, 0.18f);   // dark on the white tabletop
             }
         }
 
