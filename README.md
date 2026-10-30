@@ -12,8 +12,34 @@ The repo root is the Unity project: **Unity 6000.3.9f1**, URP, Android target fo
 - **Scene:** `Assets/Scenes/VesselPlayground.unity`. It has:
   - the Meta camera rig with passthrough (you see the real room) and tracked hands
   - a 1.2 × 0.7 m table, 0.9 m high and 0.7 m in front of you
-  - the vessel models lying flat on the table. **Tube** is shown; **AVM** and **Artery + Vein**
-    are inactive under `Vessels` (toggle them in the Hierarchy).
+  - the live vessel playground: one vessel model at a time (Tube, AVM, Artery, Vein), laid flat
+    with its access site on the right, and the guidewire and catheter inside it
+  - a status panel behind the table and five poke buttons on its front edge
+
+## Controls
+
+| | Wire (right) | Catheter (left) | Other |
+|---|---|---|---|
+| **Hands** | Right pinch: move along the vessel to push/pull, roll your wrist to twist | Left pinch: same | Touch the table buttons with a fingertip: **Model**, **Wire tip**, **Catheter tip**, **Centerlines**, **Reset** |
+| **Controllers** | Hold right trigger and move/roll; right stick: push (up/down) and twist (left/right) | Same on the left | **A** wire tip, **B** catheter tip, **X** next model, **Y** centerlines, stick click resets |
+| **Keyboard** (Editor) | **W/S** push, **A/D** twist, **Shift** faster | **Tab** switches device | **T** tip, **M** model, **C** centerlines, **R** reset |
+
+Release the pinch or trigger to ratchet for long advances. The wire tips are Straight, J-tip and
+Angled; the catheter tips are Bern, Cobra and Mikaelsson. The rules (shared route, the leading tip
+picks the branch, pulling back re-opens the choice, tip capture angles) are the same as the visionOS
+app. See `docs/vessel-playground-spec.md`.
+
+## Code
+
+| Path | What it is |
+|---|---|
+| `Assets/VesselPlayground/Core/` | Assembly `BloodVessels.Core`, ported from the Swift model with no Meta dependency: `VesselGraph`, `VesselRoute`, `FlexDevice`, `TipShape`, `CathWirePlaygroundModel` (push/twist/branch rules), `DeviceShape`, `VesselLayout`, `TubeGeometry`, `VesselModelSpec` |
+| `Assets/VesselPlayground/Scripts/` | Scene side: `VesselPlaygroundController` (loads models, draws devices and centerlines), `VesselDeviceInput` (hands, controllers, keyboard), `VesselPokeButton`, `VesselStatusPanel` |
+| `Assets/VesselPlayground/Tests/Editor/` | 35 EditMode tests ported from the Swift suite. Run them in **Window > General > Test Runner**, or `unity test . --mode EditMode` |
+
+**Coordinates:** Unity imports OBJ meshes mirrored in x. The centerlines are loaded with
+`mirrorX: true` so they match, which also mirrors the sense of twist compared with the visionOS
+app.
 - **Packages:** Unity OpenXR, Meta XR Core SDK, Interaction SDK and MR Utility Kit (207.0.1).
 - **XR setup:** OpenXR loader on Android, with the Meta Quest and Meta XR features and the Touch /
   Touch Plus controller profiles. Hand tracking is set to controllers plus hands, and passthrough is

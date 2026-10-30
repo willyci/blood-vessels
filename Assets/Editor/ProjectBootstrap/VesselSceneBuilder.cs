@@ -1,14 +1,17 @@
-using System.Linq;
+using System.IO;
+using BloodVessels;
 using UnityEditor;
+using UnityEditor.Events;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.Events;
 using UnityEngine.Rendering;
 
 namespace ProjectBootstrap
 {
     // Builds Assets/Scenes/VesselPlayground.unity: Meta camera rig with passthrough and tracked
-    // hands, a procedure table, and the vessel models lying flat on it (Tube shown, the others
-    // inactive under "Vessels"). Mirrors the visionOS playground's table layout.
+    // hands, a procedure table, the live vessel playground (VesselPlaygroundController + input),
+    // a status panel and poke buttons. Mirrors the visionOS playground's layout.
     //   Menu: Tools > Blood Vessels > Rebuild Vessel Playground Scene
     //   Headless: Unity -batchmode -buildTarget Android -projectPath <repo>
     //             -executeMethod ProjectBootstrap.VesselSceneBuilder.BuildHeadless -quit
@@ -16,29 +19,16 @@ namespace ProjectBootstrap
     {
         const string ScenePath = "Assets/Scenes/VesselPlayground.unity";
         const string MaterialFolder = "Assets/Vessels/Materials";
+        const string TextureFolder = "Assets/Vessels/Textures";
         const string ModelFolder = "Assets/Vessels/Models";
+        const string CenterlineFolder = "Assets/Vessels/Centerlines";
         const string RigPrefab = "Packages/com.meta.xr.sdk.core/Prefabs/OVRCameraRig.prefab";
         const string HandPrefab = "Packages/com.meta.xr.sdk.core/Prefabs/OVRHandPrefab.prefab";
 
         // Table (metres), matching the visionOS VesselTable.
         const float TableTop = 0.9f, TableDistance = 0.7f;
         const float TableWidth = 1.2f, TableDepth = 0.7f, TableThickness = 0.03f;
-        const float LegInset = 0.06f, LegSize = 0.04f, Clearance = 0.005f;
-
-        struct ModelSpec
-        {
-            public string Name;
-            public (string File, bool Vein)[] Meshes;
-            public float DisplayScale;
-        }
-
-        // Same catalog and display scales as VesselModelCatalog.swift.
-        static readonly ModelSpec[] Models =
-        {
-            new() { Name = "Tube", Meshes = new[] { ("VesselTube", false) }, DisplayScale = 3f },
-            new() { Name = "AVM", Meshes = new[] { ("avm_vessel_simple", false) }, DisplayScale = 4f },
-            new() { Name = "Artery + Vein", Meshes = new[] { ("artery", false), ("vein", true) }, DisplayScale = 3.5f },
-        };
+        const float LegInset = 0.06f, LegSize = 0.04f;
 
         [MenuItem("Tools/Blood Vessels/Rebuild Vessel Playground Scene")]
         public static void BuildFromMenu() => Build();
@@ -57,9 +47,12 @@ namespace ProjectBootstrap
             light.type = LightType.Directional;
             light.transform.rotation = Quaternion.Euler(50, -30, 0);
 
-            BuildRig();
+            var rig = BuildRig();
             BuildTable();
-            BuildVessels();
+            var playground = BuildPlayground();
+            BuildInput(rig, playground);
+            BuildStatusPanel(playground);
+            BuildButtons(playground);
 
             if (!AssetDatabase.IsValidFolder("Assets/Scenes")) AssetDatabase.CreateFolder("Assets", "Scenes");
             EditorSceneManager.SaveScene(EditorSceneManager.GetActiveScene(), ScenePath);
@@ -70,7 +63,7 @@ namespace ProjectBootstrap
 
         // MARK: - Camera rig, passthrough, hands
 
-        static void BuildRig()
+        static GameObject BuildRig()
         {
             var rig = (GameObject)PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(RigPrefab));
             rig.GetComponent<OVRManager>().isInsightPassthroughEnabled = true;
@@ -83,6 +76,7 @@ namespace ProjectBootstrap
 
             AddHand(rig.transform.Find("TrackingSpace/LeftHandAnchor"), right: false);
             AddHand(rig.transform.Find("TrackingSpace/RightHandAnchor"), right: true);
+            return rig;
         }
 
         static void AddHand(Transform anchor, bool right)
@@ -90,12 +84,12 @@ namespace ProjectBootstrap
             var hand = (GameObject)PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(HandPrefab), anchor);
             hand.name = right ? "OVRHandPrefab (Right)" : "OVRHandPrefab (Left)";
             if (!right) return;   // the prefab defaults to the left hand
-            SetEnum(hand.GetComponent<OVRHand>(), "HandType", 1);
-            SetEnum(hand.GetComponent<OVRSkeleton>(), "_skeletonType", 1);
-            SetEnum(hand.GetComponent<OVRMesh>(), "_meshType", 1);
+            SetInt(hand.GetComponent<OVRHand>(), "HandType", 1);
+            SetInt(hand.GetComponent<OVRSkeleton>(), "_skeletonType", 1);
+            SetInt(hand.GetComponent<OVRMesh>(), "_meshType", 1);
         }
 
-        static void SetEnum(Object target, string property, int value)
+        static void SetInt(Object target, string property, int value)
         {
             var serialized = new SerializedObject(target);
             serialized.FindProperty(property).intValue = value;
@@ -121,74 +115,150 @@ namespace ProjectBootstrap
                     new Vector3(LegSize, legHeight, LegSize), legMaterial);
         }
 
-        static void Box(string name, Transform parent, Vector3 localPosition, Vector3 size, Material material)
+        static GameObject Box(string name, Transform parent, Vector3 localPosition, Vector3 size, Material material)
         {
             var box = GameObject.CreatePrimitive(PrimitiveType.Cube);
             box.name = name;
+            Object.DestroyImmediate(box.GetComponent<Collider>());
             box.transform.SetParent(parent, false);
             box.transform.localPosition = localPosition;
             box.transform.localScale = size;
             box.GetComponent<Renderer>().sharedMaterial = material;
+            return box;
         }
 
-        // MARK: - Vessels
+        // MARK: - Playground
 
-        static void BuildVessels()
+        static VesselPlaygroundController BuildPlayground()
         {
-            var artery = TranslucentMaterial("VesselArtery", new Color(0.85f, 0.25f, 0.25f, 0.35f));
-            var vein = TranslucentMaterial("VesselVein", new Color(0.25f, 0.4f, 0.9f, 0.35f));
-            var root = new GameObject("Vessels").transform;
+            var playground = new GameObject("Vessel Playground").AddComponent<VesselPlaygroundController>();
+            playground.TableTopCenter = new Vector3(0, TableTop, TableDistance);
 
-            for (int i = 0; i < Models.Length; i++)
+            var tube = Model("VesselTube");
+            var avm = Model("avm_vessel_simple");
+            var artery = Model("artery");
+            var vein = Model("vein");
+            playground.Models = new[]
             {
-                var spec = Models[i];
-                var model = new GameObject(spec.Name).transform;
-                model.SetParent(root, false);
-                foreach (var (file, isVein) in spec.Meshes)
-                {
-                    var asset = AssetDatabase.LoadAssetAtPath<GameObject>($"{ModelFolder}/{file}.obj");
-                    var mesh = (GameObject)PrefabUtility.InstantiatePrefab(asset, model);
-                    foreach (var r in mesh.GetComponentsInChildren<Renderer>())
-                        r.sharedMaterials = Enumerable.Repeat(isVein ? vein : artery, r.sharedMaterials.Length).ToArray();
-                }
-                model.localScale = Vector3.one * spec.DisplayScale;
-                LayFlatOnTable(model);
-                model.gameObject.SetActive(i == 0);   // Tube shown; toggle the others in the Hierarchy
+                Entry(VesselModelSpec.Tube, "VesselCenterlines", new[] { tube }, new GameObject[0]),
+                Entry(VesselModelSpec.Avm, "AVMCenterlines", new[] { avm }, new GameObject[0]),
+                Entry(VesselModelSpec.Artery, "ArteryCenterlines", new[] { artery }, new[] { vein }),
+                Entry(VesselModelSpec.Vein, "VeinCenterlines", new[] { artery }, new[] { vein }),
+            };
+
+            playground.ArteryMaterial = TranslucentMaterial("VesselArtery", new Color(0.85f, 0.25f, 0.25f, 0.3f));
+            playground.VeinMaterial = TranslucentMaterial("VesselVein", new Color(0.25f, 0.4f, 0.9f, 0.3f));
+            // Near-black wire with a yellow twist stripe; bright green catheter with a white
+            // stripe, translucent so the wire shows inside it.
+            playground.WireMaterial = DeviceMaterial("DeviceWire", new Color(0.08f, 0.08f, 0.1f), Color.yellow, 1f, 0.3f);
+            playground.CatheterMaterial = DeviceMaterial("DeviceCatheter", new Color(0.1f, 0.8f, 0.35f), Color.white, 0.65f, 0f);
+            var overlay = new Material(Shader.Find("Universal Render Pipeline/Unlit")) { name = "CenterlineOverlay" };
+            overlay.SetColor("_BaseColor", Color.yellow);
+            playground.OverlayMaterial = Save(overlay);
+            return playground;
+        }
+
+        static GameObject Model(string file) => AssetDatabase.LoadAssetAtPath<GameObject>($"{ModelFolder}/{file}.obj");
+
+        static VesselModelEntry Entry(VesselModelSpec spec, string centerlines, GameObject[] arteries, GameObject[] veins) => new()
+        {
+            Spec = spec,
+            Centerlines = AssetDatabase.LoadAssetAtPath<TextAsset>($"{CenterlineFolder}/{centerlines}.json"),
+            ArteryMeshes = arteries,
+            VeinMeshes = veins,
+        };
+
+        static void BuildInput(GameObject rig, VesselPlaygroundController playground)
+        {
+            var input = playground.gameObject.AddComponent<VesselDeviceInput>();
+            input.Playground = playground;
+            input.LeftHandAnchor = rig.transform.Find("TrackingSpace/LeftHandAnchor");
+            input.RightHandAnchor = rig.transform.Find("TrackingSpace/RightHandAnchor");
+            input.LeftHand = input.LeftHandAnchor.GetComponentInChildren<OVRHand>();
+            input.RightHand = input.RightHandAnchor.GetComponentInChildren<OVRHand>();
+            input.LeftSkeleton = input.LeftHandAnchor.GetComponentInChildren<OVRSkeleton>();
+            input.RightSkeleton = input.RightHandAnchor.GetComponentInChildren<OVRSkeleton>();
+        }
+
+        // MARK: - Status panel and buttons
+
+        static Font UiFont => Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+
+        static TextMesh Label(string name, Transform parent, string text, float size, TextAnchor anchor)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(parent, false);
+            var label = go.AddComponent<TextMesh>();
+            label.font = UiFont;
+            label.GetComponent<MeshRenderer>().sharedMaterial = UiFont.material;
+            label.text = text;
+            label.fontSize = 64;
+            label.characterSize = size;
+            label.anchor = anchor;
+            label.alignment = anchor == TextAnchor.MiddleCenter ? TextAlignment.Center : TextAlignment.Left;
+            label.richText = true;
+            label.color = Color.white;
+            return label;
+        }
+
+        static void BuildStatusPanel(VesselPlaygroundController playground)
+        {
+            // Floats above the far edge of the table, readable from where the user stands.
+            var panel = new GameObject("Status Panel").transform;
+            panel.position = new Vector3(0, TableTop + 0.32f, TableDistance + TableDepth / 2 + 0.02f);
+            var backing = Box("Backing", panel, new Vector3(0, 0, 0.005f), new Vector3(0.9f, 0.22f, 0.005f),
+                OpaqueMaterial("PanelBacking", new Color(0.08f, 0.1f, 0.13f), 0.3f));
+            backing.name = "Backing";
+            var status = panel.gameObject.AddComponent<VesselStatusPanel>();
+            status.Playground = playground;
+            status.Text = Label("Text", panel, "Loading…", 0.0035f, TextAnchor.MiddleLeft);
+            status.Text.transform.localPosition = new Vector3(-0.43f, 0, 0);
+
+            var help = Label("Help", panel,
+                "Pinch (hands) or hold trigger (controllers) and move along the vessel to push, roll your wrist to twist. " +
+                "Left = catheter, right = wire.\nSticks: push / twist.  A/B: wire / catheter tip.  X: model.  Y: centerlines.  Stick click: reset.",
+                0.003f, TextAnchor.UpperCenter);
+            help.transform.localPosition = new Vector3(0, -0.122f, 0);
+            help.alignment = TextAlignment.Center;
+        }
+
+        static void BuildButtons(VesselPlaygroundController playground)
+        {
+            // A row along the user's edge of the table, left of center.
+            var row = new GameObject("Buttons").transform;
+            row.position = new Vector3(-0.3f, TableTop, TableDistance - TableDepth / 2 + 0.07f);
+            var baseMaterial = OpaqueMaterial("ButtonBase", new Color(0.15f, 0.17f, 0.2f), 0.4f);
+            var capMaterial = OpaqueMaterial("ButtonCap", new Color(0.2f, 0.25f, 0.3f), 0.5f);
+
+            (string label, UnityAction action)[] buttons =
+            {
+                ("Model", playground.NextModel),
+                ("Wire tip", playground.CycleWireTip),
+                ("Catheter tip", playground.CycleCatheterTip),
+                ("Centerlines", playground.ToggleCenterlines),
+                ("Reset", playground.ResetDevices),
+            };
+            for (int i = 0; i < buttons.Length; i++)
+            {
+                var button = new GameObject($"Button {buttons[i].label}").transform;
+                button.SetParent(row, false);
+                button.localPosition = new Vector3((i - 2) * 0.1f, 0, 0);
+                Box("Base", button, new Vector3(0, 0.006f, 0), new Vector3(0.065f, 0.012f, 0.065f), baseMaterial);
+                var cap = Box("Cap", button, new Vector3(0, 0.016f, 0), new Vector3(0.05f, 0.008f, 0.05f), capMaterial);
+
+                var poke = button.gameObject.AddComponent<VesselPokeButton>();
+                poke.Cap = cap.GetComponent<Renderer>();
+                poke.TouchHalfExtents = new Vector3(0.03f, 0.03f, 0.03f);
+                UnityEventTools.AddPersistentListener(poke.OnPress, buttons[i].action);
+
+                // Label lying just behind the button, tilted up toward the user.
+                var label = Label("Label", button, buttons[i].label, 0.0026f, TextAnchor.MiddleCenter);
+                label.transform.localPosition = new Vector3(0, 0.003f, 0.045f);
+                label.transform.localRotation = Quaternion.Euler(60, 0, 0);
             }
         }
 
-        /// Turns the model so its thinnest extent is vertical and its longest runs left–right,
-        /// then centers it over the table with its lowest point just above the top.
-        /// (The visionOS app also turns the access site to the right using the centerlines;
-        /// that comes with the VesselLayout port.)
-        static void LayFlatOnTable(Transform model)
-        {
-            model.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
-            var size = WorldBounds(model).size;
-            Vector3[] axes = { Vector3.right, Vector3.up, Vector3.forward };
-            var order = Enumerable.Range(0, 3).OrderBy(i => size[i]).ToArray();
-            var thinnest = axes[order[0]];
-            var longest = axes[order[2]];
-
-            // Rotation taking (longest, thinnest) onto (world right, world up).
-            var fromModel = Quaternion.LookRotation(longest, thinnest);
-            var toWorld = Quaternion.LookRotation(Vector3.right, Vector3.up);
-            model.rotation = toWorld * Quaternion.Inverse(fromModel);
-
-            var bounds = WorldBounds(model);
-            var target = new Vector3(0, TableTop + Clearance, TableDistance);
-            model.position += new Vector3(target.x - bounds.center.x, target.y - bounds.min.y, target.z - bounds.center.z);
-        }
-
-        static Bounds WorldBounds(Transform t)
-        {
-            var renderers = t.GetComponentsInChildren<Renderer>();
-            var bounds = renderers[0].bounds;
-            foreach (var r in renderers.Skip(1)) bounds.Encapsulate(r.bounds);
-            return bounds;
-        }
-
-        // MARK: - Materials (URP Lit, saved as assets so they can be tuned in the Inspector)
+        // MARK: - Materials and textures (saved as assets so they can be tuned in the Inspector)
 
         static Material OpaqueMaterial(string name, Color color, float smoothness, float metallic = 0)
         {
@@ -204,6 +274,24 @@ namespace ProjectBootstrap
             var material = NewLit(name);
             material.SetColor("_BaseColor", color);
             material.SetFloat("_Smoothness", 0.6f);
+            MakeTransparent(material);
+            material.SetFloat("_Cull", (float)CullMode.Off);   // see the far wall through the near one
+            return Save(material);
+        }
+
+        static Material DeviceMaterial(string name, Color baseColor, Color stripe, float opacity, float metallic)
+        {
+            var material = NewLit(name);
+            material.SetTexture("_BaseMap", StripeTexture(name + "Stripe", baseColor, stripe));
+            material.SetColor("_BaseColor", new Color(1, 1, 1, opacity));
+            material.SetFloat("_Metallic", metallic);
+            material.SetFloat("_Smoothness", 0.6f);
+            if (opacity < 1) MakeTransparent(material);
+            return Save(material);
+        }
+
+        static void MakeTransparent(Material material)
+        {
             material.SetFloat("_Surface", 1);   // transparent
             material.SetFloat("_Blend", 0);     // alpha
             material.SetFloat("_SrcBlend", (float)BlendMode.SrcAlpha);
@@ -214,7 +302,25 @@ namespace ProjectBootstrap
             material.SetOverrideTag("RenderType", "Transparent");
             material.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
             material.renderQueue = (int)RenderQueue.Transparent;
-            return Save(material);
+        }
+
+        /// One stripe a quarter of the way around — rotates with twist.
+        static Texture2D StripeTexture(string name, Color baseColor, Color stripe)
+        {
+            if (!AssetDatabase.IsValidFolder(TextureFolder)) AssetDatabase.CreateFolder("Assets/Vessels", "Textures");
+            var path = $"{TextureFolder}/{name}.png";
+            var texture = new Texture2D(64, 4, TextureFormat.RGBA32, false);
+            for (int x = 0; x < 64; x++)
+            for (int y = 0; y < 4; y++)
+                texture.SetPixel(x, y, x < 16 ? stripe : baseColor);
+            File.WriteAllBytes(path, texture.EncodeToPNG());
+            Object.DestroyImmediate(texture);
+            AssetDatabase.ImportAsset(path);
+            var importer = (TextureImporter)AssetImporter.GetAtPath(path);
+            importer.wrapMode = TextureWrapMode.Repeat;
+            importer.mipmapEnabled = false;
+            importer.SaveAndReimport();
+            return AssetDatabase.LoadAssetAtPath<Texture2D>(path);
         }
 
         static Material NewLit(string name) =>
@@ -230,6 +336,7 @@ namespace ProjectBootstrap
                 AssetDatabase.CreateAsset(material, path);
                 return material;
             }
+            existing.shader = material.shader;
             existing.CopyPropertiesFromMaterial(material);   // keep the asset GUID on rebuilds
             existing.shaderKeywords = material.shaderKeywords;
             existing.renderQueue = material.renderQueue;
